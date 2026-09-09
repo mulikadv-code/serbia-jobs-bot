@@ -2,32 +2,29 @@ import os
 import time
 import requests
 from datetime import datetime, timedelta
+import feedparser
 from deep_translator import GoogleTranslator
 
 # === НАСТРОЙКИ ===
 CHANNEL_USERNAME = "@rabota_v_serbii"  # username вашего канала
-AREA_CODE = 113  # код Сербии на hh.ru
-SEARCH_PERIOD_MINUTES = 30  # ищем вакансии за последние 30 минут
-PER_PAGE = 100  # максимум вакансий на странице
-SENT_IDS_FILE = "sent_ids.txt"  # файл для хранения отправленных ID
+RSS_URL = "https://www.mojposao.net/rss"
+SEARCH_PERIOD_MINUTES = 30
+SENT_IDS_FILE = "sent_ids.txt"
 
-# Токен берём из переменной окружения (секрет GitHub)
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("Не найден BOT_TOKEN. Добавьте секрет в настройках репозитория.")
 
 def translate_text(text, target_lang="ru"):
-    """Переводит текст на русский, если он не пустой."""
     if not text:
         return ""
     try:
         return GoogleTranslator(source="auto", target=target_lang).translate(text)
     except Exception as e:
         print(f"Ошибка перевода: {e}")
-        return text  # возвращаем оригинал, если не удалось перевести
+        return text
 
 def get_sent_ids():
-    """Читает список уже отправленных ID из файла."""
     try:
         with open(SENT_IDS_FILE, "r") as f:
             return set(line.strip() for line in f if line.strip())
@@ -35,72 +32,60 @@ def get_sent_ids():
         return set()
 
 def save_sent_ids(ids):
-    """Сохраняет обновлённый список ID в файл."""
     with open(SENT_IDS_FILE, "w") as f:
         for vac_id in ids:
             f.write(f"{vac_id}\n")
 
 def fetch_new_vacancies():
-    """Запрашивает свежие вакансии из hh.ru по Сербии."""
-    date_from = (datetime.now() - timedelta(minutes=SEARCH_PERIOD_MINUTES)).isoformat(timespec="seconds")
-    url = "https://api.hh.ru/vacancies"
-    params = {
-        "area": AREA_CODE,
-        "date_from": date_from,
-        "per_page": PER_PAGE,
-        "page": 0,
-        "order_by": "publication_time",
-    }
-    # Заголовки, имитирующие обычный браузер
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "application/json, text/plain, */*",
-        "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
-        "Connection": "keep-alive",
-    }
-    # Пауза 1 секунда перед запросом (на всякий случай)
-    time.sleep(1)
-    response = requests.get(url, params=params, headers=headers)
-    response.raise_for_status()
-    return response.json().get("items", [])
+    """Парсит RSS-ленту MojPosao и возвращает новые вакансии за период."""
+    feed = feedparser.parse(RSS_URL)
+    entries = feed.entries
+    print(f"Всего записей в RSS: {len(entries)}")
 
-def format_vacancy_message(vac):
-    """Формирует текст поста для Telegram."""
-    title = vac.get("name", "Без названия")
-    company = vac.get("employer", {}).get("name", "Не указана")
-    area = vac.get("area", {}).get("name", "Не указан")
-    salary = vac.get("salary")
-    if salary:
-        salary_from = salary.get("from")
-        salary_to = salary.get("to")
-        currency = salary.get("currency", "")
-        if salary_from and salary_to:
-            salary_text = f"{salary_from}–{salary_to} {currency}"
-        elif salary_from:
-            salary_text = f"от {salary_from} {currency}"
-        elif salary_to:
-            salary_text = f"до {salary_to} {currency}"
+    new_entries = []
+    cutoff = datetime.now() - timedelta(minutes=SEARCH_PERIOD_MINUTES)
+    for entry in entries:
+        # Пытаемся получить дату публикации
+        pub_date = None
+        if hasattr(entry, 'published_parsed') and entry.published_parsed:
+            pub_date = datetime(*entry.published_parsed[:6])
+        elif hasattr(entry, 'updated_parsed') and entry.updated_parsed:
+            pub_date = datetime(*entry.updated_parsed[:6])
         else:
-            salary_text = "не указана"
-    else:
-        salary_text = "не указана"
-    description = vac.get("snippet", {}).get("requirement") or vac.get("snippet", {}).get("responsibility") or ""
+            # Если даты нет, считаем вакансию новой (на всякий случай)
+            new_entries.append(entry)
+            continue
+
+        if pub_date >= cutoff:
+            new_entries.append(entry)
+
+    print(f"Новых вакансий за {SEARCH_PERIOD_MINUTES} мин: {len(new_entries)}")
+    return new_entries
+
+def format_vacancy_message(entry):
+    """Формирует пост из записи RSS."""
+    title = entry.get('title', 'Без названия')
+    link = entry.get('link', '')
+    # Пытаемся извлечь описание из summary или description
+    description = ''
+    if 'summary' in entry:
+        description = entry.summary
+    elif 'description' in entry:
+        description = entry.description
+    # Убираем HTML-теги (простая очистка)
+    import re
+    description_clean = re.sub('<[^<]+?>', '', description)
     # Переводим описание
-    description_ru = translate_text(description)
-    link = vac.get("alternate_url", "")
+    description_ru = translate_text(description_clean)
 
     message = (
-        f"🇷🇸 *{title}*\n"
-        f"🏢 Компания: {company}\n"
-        f"📍 Город: {area}\n"
-        f"💰 Зарплата: {salary_text}\n\n"
+        f"🇷🇸 *{title}*\n\n"
         f"📝 {description_ru}\n\n"
         f"🔗 [Открыть вакансию]({link})"
     )
     return message
 
 def send_to_telegram(message):
-    """Отправляет сообщение в канал через Telegram Bot API."""
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     data = {
         "chat_id": CHANNEL_USERNAME,
@@ -116,20 +101,20 @@ def main():
     sent_ids = get_sent_ids()
     print(f"Уже отправлено ID: {len(sent_ids)}")
 
-    vacancies = fetch_new_vacancies()
-    print(f"Найдено вакансий за последние {SEARCH_PERIOD_MINUTES} мин: {len(vacancies)}")
+    entries = fetch_new_vacancies()
 
     new_ids = []
-    for vac in vacancies:
-        vac_id = vac.get("id")
+    for entry in entries:
+        # Используем ссылку как уникальный идентификатор
+        vac_id = entry.get('link') or entry.get('id') or entry.get('title')
         if vac_id in sent_ids:
             continue
         try:
-            message = format_vacancy_message(vac)
+            message = format_vacancy_message(entry)
             send_to_telegram(message)
-            print(f"Отправлена вакансия ID {vac_id}: {vac.get('name')}")
+            print(f"Отправлена вакансия: {entry.get('title', '')}")
             new_ids.append(vac_id)
-            time.sleep(2)  # пауза между отправками, чтобы не упереться в лимиты Telegram
+            time.sleep(2)
         except Exception as e:
             print(f"Ошибка при обработке вакансии {vac_id}: {e}")
 
