@@ -51,7 +51,15 @@ def fetch_new_vacancies():
         "page": 0,
         "order_by": "publication_time",
     }
-    headers = {"User-Agent": "SerbiaJobsBot/1.0 (mulika.dv@gmail.com)"}  # можно указать любой email
+    # Заголовки, имитирующие обычный браузер
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Connection": "keep-alive",
+    }
+    # Пауза 1 секунда перед запросом (на всякий случай)
+    time.sleep(1)
     response = requests.get(url, params=params, headers=headers)
     response.raise_for_status()
     return response.json().get("items", [])
