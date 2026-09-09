@@ -51,7 +51,7 @@ def fetch_new_vacancies():
         "page": 0,
         "order_by": "publication_time",
     }
-    headers = {"User-Agent": "SerbiaJobsBot/1.0 (my@email.com)"}  # можно указать любой email
+    headers = {"User-Agent": "SerbiaJobsBot/1.0 (mulika.dv@gmail.com)"}  # можно указать любой email
     response = requests.get(url, params=params, headers=headers)
     response.raise_for_status()
     return response.json().get("items", [])
