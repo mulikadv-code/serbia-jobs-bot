@@ -7,7 +7,7 @@ import feedparser
 from deep_translator import GoogleTranslator
 
 # === НАСТРОЙКИ ===
-CHANNEL_USERNAME = "@rabota_v_serbii"
+CHANNEL_USERNAME = "@rabita_v_serbii"
 RSS_URL = "https://www.helloworld.rs/rss"
 SENT_IDS_FILE = "sent_ids.txt"
 
