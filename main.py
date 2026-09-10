@@ -1,19 +1,20 @@
 import os
 import time
 import requests
-from datetime import datetime, timedelta
+import re
+from datetime import datetime
 import feedparser
 from deep_translator import GoogleTranslator
 
 # === НАСТРОЙКИ ===
-CHANNEL_USERNAME = "@rabota_v_serbii"  # username вашего канала
-RSS_URL = "https://www.mojposao.net/rss"
-SEARCH_PERIOD_MINUTES = 30
+CHANNEL_USERNAME = "@rabota_v_serbii"
+RSS_URL = "https://www.helloworld.rs/rss"
 SENT_IDS_FILE = "sent_ids.txt"
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("Не найден BOT_TOKEN. Добавьте секрет в настройках репозитория.")
+
 
 def translate_text(text, target_lang="ru"):
     if not text:
@@ -24,6 +25,7 @@ def translate_text(text, target_lang="ru"):
         print(f"Ошибка перевода: {e}")
         return text
 
+
 def get_sent_ids():
     try:
         with open(SENT_IDS_FILE, "r") as f:
@@ -31,59 +33,70 @@ def get_sent_ids():
     except FileNotFoundError:
         return set()
 
+
 def save_sent_ids(ids):
     with open(SENT_IDS_FILE, "w") as f:
         for vac_id in ids:
             f.write(f"{vac_id}\n")
 
-def fetch_new_vacancies():
-    """Парсит RSS-ленту MojPosao и возвращает новые вакансии за период."""
-    feed = feedparser.parse(RSS_URL)
-    entries = feed.entries
-    print(f"Всего записей в RSS: {len(entries)}")
 
-    new_entries = []
-    cutoff = datetime.now() - timedelta(minutes=SEARCH_PERIOD_MINUTES)
-    for entry in entries:
-        # Пытаемся получить дату публикации
-        pub_date = None
-        if hasattr(entry, 'published_parsed') and entry.published_parsed:
-            pub_date = datetime(*entry.published_parsed[:6])
-        elif hasattr(entry, 'updated_parsed') and entry.updated_parsed:
-            pub_date = datetime(*entry.updated_parsed[:6])
-        else:
-            # Если даты нет, считаем вакансию новой (на всякий случай)
-            new_entries.append(entry)
-            continue
+def fetch_vacancies():
+    """Скачивает RSS и возвращает все записи."""
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                      "AppleWebKit/537.36 (KHTML, like Gecko) "
+                      "Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "application/rss+xml, application/xml, text/xml, */*",
+    }
+    try:
+        response = requests.get(RSS_URL, headers=headers, timeout=30)
+        response.raise_for_status()
+        feed = feedparser.parse(response.content)
+        entries = feed.entries
+        print(f"Всего записей в RSS: {len(entries)}")
+        return entries
+    except Exception as e:
+        print(f"Ошибка при загрузке RSS: {e}")
+        return []
 
-        if pub_date >= cutoff:
-            new_entries.append(entry)
 
-    print(f"Новых вакансий за {SEARCH_PERIOD_MINUTES} мин: {len(new_entries)}")
-    return new_entries
+def clean_html(text):
+    """Убирает HTML-теги из строки."""
+    if not text:
+        return ""
+    return re.sub(r"<[^<]+?>", "", text).strip()
+
 
 def format_vacancy_message(entry):
-    """Формирует пост из записи RSS."""
-    title = entry.get('title', 'Без названия')
-    link = entry.get('link', '')
-    # Пытаемся извлечь описание из summary или description
-    description = ''
-    if 'summary' in entry:
-        description = entry.summary
-    elif 'description' in entry:
-        description = entry.description
-    # Убираем HTML-теги (простая очистка)
-    import re
-    description_clean = re.sub('<[^<]+?>', '', description)
-    # Переводим описание
-    description_ru = translate_text(description_clean)
+    """Формирует сообщение для Telegram."""
+    title = entry.get("title", "Без названия")
+    link = entry.get("link", "")
+
+    # Описание: пробуем разные поля
+    description = ""
+    for field in ("summary", "description"):
+        if field in entry and entry[field]:
+            description = entry[field]
+            break
+    description_clean = clean_html(description)
+
+    # Ограничиваем длину описания, чтобы Telegram не ругался
+    if len(description_clean) > 700:
+        description_clean = description_clean[:700] + "..."
+
+    description_ru = translate_text(description_clean) if description_clean else ""
+    title_ru = translate_text(title)
 
     message = (
-        f"🇷🇸 *{title}*\n\n"
+        f"🇷🇸 *{title_ru}*\n\n"
         f"📝 {description_ru}\n\n"
         f"🔗 [Открыть вакансию]({link})"
     )
+    # Telegram ограничивает длину сообщения 4096 символами
+    if len(message) > 4000:
+        message = message[:3990] + "..."
     return message
+
 
 def send_to_telegram(message):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
@@ -97,33 +110,36 @@ def send_to_telegram(message):
     response.raise_for_status()
     return response.json()
 
+
 def main():
     sent_ids = get_sent_ids()
     print(f"Уже отправлено ID: {len(sent_ids)}")
 
-    entries = fetch_new_vacancies()
+    entries = fetch_vacancies()
 
     new_ids = []
     for entry in entries:
-        # Используем ссылку как уникальный идентификатор
-        vac_id = entry.get('link') or entry.get('id') or entry.get('title')
+        vac_id = entry.get("link") or entry.get("id") or entry.get("title")
+        if not vac_id:
+            continue
         if vac_id in sent_ids:
             continue
         try:
             message = format_vacancy_message(entry)
             send_to_telegram(message)
-            print(f"Отправлена вакансия: {entry.get('title', '')}")
+            print(f"✅ Отправлено: {entry.get('title', '')[:60]}")
             new_ids.append(vac_id)
             time.sleep(2)
         except Exception as e:
-            print(f"Ошибка при обработке вакансии {vac_id}: {e}")
+            print(f"❌ Ошибка при отправке '{entry.get('title', '')[:40]}': {e}")
 
     if new_ids:
         sent_ids.update(new_ids)
         save_sent_ids(sent_ids)
-        print(f"Добавлено и сохранено ID: {len(new_ids)}")
+        print(f"Сохранено новых ID: {len(new_ids)}")
     else:
         print("Новых вакансий нет.")
+
 
 if __name__ == "__main__":
     main()
